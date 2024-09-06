@@ -1,8 +1,8 @@
 import { StatusBar } from "expo-status-bar";
 import { StyleSheet, View, Platform } from "react-native";
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import domtoimage from 'dom-to-image';
-
+import * as Device from 'expo-device';
 import Button from './components/Button';
 import CircleButton from './components/CircleButton';
 import EmojiList from './components/EmojiList';
@@ -14,8 +14,67 @@ import IconButton from './components/IconButton';
 import ImageViewer from './components/ImageViewer';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
+import * as Notifications from 'expo-notifications';
+import * as BackgroundFetch from 'expo-background-fetch';
+import * as TaskManager from 'expo-task-manager';
+
+const BACKGROUND_NOTIFICATION_TASK = 'BACKGROUND-NOTIFICATION-TASK';
+
+TaskManager.defineTask(BACKGROUND_NOTIFICATION_TASK, async () => {
+  try {
+    console.log('doing background task...');
+    const notifications = await fetchNotificationsFromAPI();
+    console.log(notifications);
+
+    scheduleRandomNotifications(notifications);
+
+    return BackgroundFetch.BackgroundFetchResult.NewData;
+  } catch (error) {
+    console.error('Error in background task', error);
+    return BackgroundFetch.BackgroundFetchResult.Failed;
+  }
+});
+
+async function fetchNotificationsFromAPI() {
+  const response = await fetch('https://simple-express-app-ten.vercel.app/api/notifications');
+  const data = await response.json();
+  return data;
+}
+
+function scheduleRandomNotifications(notifications) {
+  for (let i = 0; i < 5; i++) {
+    const randomIndex = Math.floor(Math.random() * notifications.length);
+    const notification = notifications[randomIndex];
+    const triggerTime = randomizeTimeWithinTenMinutes();
+
+    console.log(`Scheduling notification "${notification.title}" at ${new Date(triggerTime).toLocaleTimeString()}`);
+
+    Notifications.scheduleNotificationAsync({
+      content: {
+        title: notification.title,
+        body: notification.body,
+        data: notification.data,
+      },
+      trigger: { date: triggerTime },
+    });
+  }
+}
+
+function randomizeTimeWithinTenMinutes() {
+  const now = new Date();
+  const randomOffset = Math.floor(Math.random() * 10 * 1000); // Random time within 10 seconds for quick testing
+  return new Date(now.getTime() + randomOffset);
+}
 
 const PlaceholderImage = require("./assets/images/background-image.png");
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: false,
+    shouldSetBadge: false,
+  }),
+});
 
 export default function App() {
   const imageRef = useRef();
@@ -25,6 +84,56 @@ export default function App() {
   const [selectedImage, setSelectedImage] = useState(null);
   const [showAppOptions, setShowAppOptions] = useState(false);
   const [status, requestPermission] = MediaLibrary.usePermissions();
+  const [expoPushToken, setExpoPushToken] = useState('');
+  const [channels, setChannels] = useState([]);
+  const [notification, setNotification] = useState(undefined);
+  const notificationListener = useRef();
+  const responseListener = useRef();
+
+  useEffect(() => {
+    const registerBackgroundFetch = async () => {
+      try {
+        const status = await BackgroundFetch.getStatusAsync();
+        if (status === BackgroundFetch.BackgroundFetchStatus.Available) {
+          await BackgroundFetch.registerTaskAsync(BACKGROUND_NOTIFICATION_TASK, {
+            minimumInterval: 1 * 10,
+            stopOnTerminate: false,
+            startOnBoot: true,
+          });
+          console.log('Background fetch task registered');
+        } else {
+          console.log('Background fetch is not available:', status);
+        }
+      } catch (err) {
+        console.error('Error registering background fetch task:', err);
+      }
+    };
+
+    registerBackgroundFetch();
+
+    registerForPushNotificationsAsync().then(token => token && setExpoPushToken(token));
+
+    if (Platform.OS === 'android') {
+      Notifications.getNotificationChannelsAsync().then(value => setChannels(value ?? []));
+    }
+
+
+    notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
+      setNotification(notification);
+    });
+
+    responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
+      console.log(response);
+    });
+
+
+    return () => {
+      notificationListener.current &&
+        Notifications.removeNotificationSubscription(notificationListener.current);
+      responseListener.current &&
+        Notifications.removeNotificationSubscription(responseListener.current);
+    };
+  }, []);
 
   const pickImageAsync = async () => {
     let result = await ImagePicker.launchImageLibraryAsync({
@@ -104,7 +213,10 @@ export default function App() {
         {showAppOptions ? (
           <View style={styles.optionsContainer}>
             <View style={styles.optionsRow}>
-              <IconButton icon="refresh" label="Reset" onPress={onReset} />
+              <IconButton icon="refresh" label="Reset" onPress={async () => {
+                onReset();
+                scheduleRandomNotifications([{ title: 'asdasd', body: 'dsfdsf', data: {} }, { title: 'asdasd', body: 'dsfdsf', data: {} }, { title: 'asdasd', body: 'dsfdsf', data: {} }, { title: 'asdasd', body: 'dsfdsf', data: {} }, { title: 'asdasd', body: 'dsfdsf', data: {} }]);
+              }} />
               <CircleButton onPress={onAddSticker} />
               <IconButton icon="save-alt" label="Save" onPress={onSaveImageAsync} />
             </View>
@@ -147,3 +259,62 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
   },
 });
+
+async function schedulePushNotification() {
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: "You've got mail! 📬",
+      body: 'Here is the notification body',
+      data: { data: 'goes here', test: { test1: 'more data' } },
+    },
+    trigger: { seconds: 2 },
+  });
+}
+
+async function registerForPushNotificationsAsync() {
+  let token;
+
+  if (Platform.OS === 'android') {
+    await Notifications.setNotificationChannelAsync('default', {
+      name: 'default',
+      importance: Notifications.AndroidImportance.MAX,
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#FF231F7C',
+    });
+  }
+
+  if (Device.isDevice) {
+    const { status: existingStatus } = await Notifications.getPermissionsAsync();
+    let finalStatus = existingStatus;
+    if (existingStatus !== 'granted') {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+    if (finalStatus !== 'granted') {
+      alert('Failed to get push token for push notification!');
+      return;
+    }
+
+
+
+    try {
+      const projectId =
+        Constants?.expoConfig?.extra?.eas?.projectId ?? Constants?.easConfig?.projectId;
+      if (!projectId) {
+        throw new Error('Project ID not found');
+      }
+      token = (
+        await Notifications.getExpoPushTokenAsync({
+          projectId,
+        })
+      ).data;
+      console.log(token);
+    } catch (e) {
+      token = `${e}`;
+    }
+  } else {
+    alert('Must use physical device for Push Notifications');
+  }
+
+  return token;
+}
